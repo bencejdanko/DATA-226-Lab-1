@@ -6,7 +6,7 @@ from datetime import timedelta
 
 default_args = {
     'start_date': airflow.utils.dates.days_ago(0),
-    'retries': 1,
+    'retries': 2,
     'retry_delay': timedelta(minutes=5)
 }
 
