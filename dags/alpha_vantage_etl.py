@@ -21,6 +21,23 @@ def return_snowflake_conn():
     conn = hook.get_conn()
     return conn.cursor()
 
+def create_table(table, cur):
+  try:
+    cur.execute(f"""
+    create or replace table {table} (
+      id INT AUTOINCREMENT PRIMARY KEY,
+      symbol string,
+      date date,
+      open float,
+      high float,
+      low float,
+      close float,
+      volume float
+    );
+    """)
+  except Exception as e:
+    logger.error(f"Error creating table: {e}")
+    raise Exception("Error creating table")
 
 def insert_records(table, data, symbol, cur):
     try:
@@ -73,7 +90,7 @@ def load(data, target_table, symbol):
     cur = return_snowflake_conn()
     try:
         cur.execute("BEGIN;")
-        #create_table(target_table, cur)
+        create_table(target_table, cur)
         insert_records(target_table, data, symbol, cur)
         cur.execute("COMMIT;")
     except Exception as e:
@@ -81,24 +98,46 @@ def load(data, target_table, symbol):
     finally:
         cur.close()
 
+@task
+def merge(target_table):
+    cur = return_snowflake_conn()
+    try:
+        cur.execute("BEGIN;")
+        cur.execute(f"""
+            MERGE INTO {target_table} t
+            USING raw_data.temp s
+            ON t.symbol = s.symbol AND t.date = s.date
+            WHEN NOT MATCHED THEN
+            INSERT (symbol, date, open, high, low, close, volume)
+            VALUES (s.symbol, s.date, s.open, s.high, s.low, s.close, s.volume);
+        """)
+        cur.execute("COMMIT;")
+    except Exception as e:
+        cur.execute("ROLLBACK;")
+    finally:
+        cur.close()
+
 with DAG(
-    dag_id = 'AlphaVantage_ETL',
+    dag_id = 'AlphaVantage_ETL_Lab1',
     start_date = datetime(2024,9,27),
-    catchup=True,
+    catchup=False,
     tags=['ETL'],
     schedule_interval='@daily',
 ) as dag:
     symbol = "AAPL"
+    stage_table = "raw_data.temp"
     target_table = "raw_data.time_series_daily"
     api_key = Variable.get("alpha_vantage_api_key")
 
     data = extract(symbol, api_key)
     data = transform(data)
-    load(data, target_table, symbol)
+    load(data, stage_table, symbol)
+    merge(target_table)
     logger.info("ETL process completed for AAPL")
 
     symbol = "NVDA"
     data = extract(symbol, api_key)
     data = transform(data)
-    load(data, target_table, symbol)
+    load(data, stage_table, symbol)
+    merge(target_table)
     logger.info("ETL process completed for NVDA")
