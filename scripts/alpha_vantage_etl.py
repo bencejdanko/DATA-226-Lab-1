@@ -1,21 +1,25 @@
-from airflow import DAG
-from airflow.models import Variable
-from airflow.decorators import task
-from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
+import snowflake.connector
+
 from datetime import timedelta
 from datetime import datetime
 import requests
 import logging
+import os
 
 # Initialize the logger
 logger = logging.getLogger(__name__)
 
 def return_snowflake_conn():
-    # Initialize the SnowflakeHook
-    hook = SnowflakeHook(snowflake_conn_id='snowflake_conn')
-    # Execute the query and fetch results
-    conn = hook.get_conn()
-    return conn.cursor()
+    conn = snowflake.connector.connect(
+        user= os.getenv('SNOWFLAKE_USER'),
+        password= os.getenv('SNOWFLAKE_PASSWORD'),
+        account= os.getenv('SNOWFLAKE_ACCOUNT'),
+        warehouse='compute_wh',
+        database='time_series',
+        schema='raw_data'
+    )
+    cur = conn.cursor()
+    return cur
 
 def create_table(table, cur):
     try:
@@ -63,14 +67,12 @@ def insert_records(table, data, symbol, cur):
         logger.error(f"Transaction failed: {e}")
         raise
 
-@task
 def extract(symbol, api_key):
     url = f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&apikey={api_key}'
     r = requests.get(url)
     data = r.json()
     return data
 
-@task
 def transform(data):
     results = []   # empty list for now to hold the 90 days of stock info (open, high, low, close, volume)
     for d in data["Time Series (Daily)"]:   # here d is a date: "YYYY-MM-DD"
@@ -79,7 +81,6 @@ def transform(data):
         results.append(stock_info)
     return results
 
-@task
 def load(data, target_table, symbol):
     cur = return_snowflake_conn()
     try:
@@ -92,7 +93,6 @@ def load(data, target_table, symbol):
     finally:
         cur.close()
 
-@task
 def merge(target_table):
     cur = return_snowflake_conn()
     try:
@@ -111,31 +111,20 @@ def merge(target_table):
     finally:
         cur.close()
 
-with DAG(
-    dag_id='AlphaVantage_ETL_Lab1',
-    start_date=datetime(2024, 9, 27),
-    catchup=False,
-    tags=['ETL'],
-    schedule_interval='@daily',
-) as dag:
-    symbol = "AAPL"
-    stage_table = "raw_data.temp"
-    target_table = "raw_data.time_series_daily"
-    api_key = Variable.get("alpha_vantage_api_key")
+symbol = "AAPL"
+stage_table = "raw_data.temp"
+target_table = "raw_data.time_series_daily"
+api_key = os.getenv('ALPHA_VANTAGE_API_KEY')
 
-    data_aapl = extract(symbol, api_key)
-    transformed_data_aapl = transform(data_aapl)
-    load_task_aapl = load(transformed_data_aapl, stage_table, symbol)
-    merge_task_aapl = merge(target_table)
+data_aapl = extract(symbol, api_key)
+transformed_data_aapl = transform(data_aapl)
+load_task_aapl = load(transformed_data_aapl, stage_table, symbol)
+merge_task_aapl = merge(target_table)
 
-    load_task_aapl >> merge_task_aapl
+symbol = "NVDA"
+data_nvda = extract(symbol, api_key)
+transformed_data_nvda = transform(data_nvda)
+load_task_nvda = load(transformed_data_nvda, stage_table, symbol)
+merge_task_nvda = merge(target_table)
 
-    symbol = "NVDA"
-    data_nvda = extract(symbol, api_key)
-    transformed_data_nvda = transform(data_nvda)
-    load_task_nvda = load(transformed_data_nvda, stage_table, symbol)
-    merge_task_nvda = merge(target_table)
-
-    load_task_nvda >> merge_task_nvda
-
-    logger.info("ETL process completed for AAPL and NVDA")
+logger.info("ETL process completed for AAPL and NVDA")
